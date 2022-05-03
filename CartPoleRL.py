@@ -34,6 +34,7 @@ class DQN:
         self.memory_counter = 0  # 记忆计数
         self.memory = np.zeros((2000, 2 * n_states + 1 + 1))  # s, s', a, r
         self.cost = []  # 记录损失值
+        self.done_step_list = []
 
     def choose_action(self, state, epsilon):
         state = torch.unsqueeze(torch.FloatTensor(state), 0)  # (1,2)
@@ -57,10 +58,11 @@ class DQN:
         # target net 更新频率,用于预测，不会及时更新参数
         if self.learn_step_counter % 100 == 0:
             self.target_net.load_state_dict((self.eval_net.state_dict()))
+            # print("update eval to target")
         self.learn_step_counter += 1
 
         # 使用记忆库中批量数据
-        sample_index = np.random.choice(2000, 32)  # 200个中随机抽取32个作为batch_size
+        sample_index = np.random.choice(2000, 16)  # 200个中随机抽取32个作为batch_size
         memory = self.memory[sample_index, :]  # 取的记忆单元，并逐个提取
         state = torch.FloatTensor(memory[:, :self.n_states])
         action = torch.LongTensor(memory[:, self.n_states:self.n_states + 1])
@@ -71,8 +73,8 @@ class DQN:
         q_eval = self.eval_net(state).gather(1, action) # eval_net->(64,4)->按照action索引提取出q_value
         q_next = self.target_net(next_state).detach()
         # torch.max->[values=[],indices=[]] max(1)[0]->values=[]
-        q_target = reward + 0.9 * q_next.max(1)[0].unsqueeze(1) # label
-        loss = self.loss(q_eval, q_target)
+        q_target = reward + 0.5 * q_next.max(1)[0].unsqueeze(1) # label
+        loss = self.loss(q_eval, q_target)  # td error
         self.cost.append(loss)
         # 反向传播更新
         self.optimizer.zero_grad()  # 梯度重置
@@ -80,9 +82,15 @@ class DQN:
         self.optimizer.step()  # 更新模型参数
 
     def plot_cost(self):
+        plt.subplot(1,2,1)
         plt.plot(np.arange(len(self.cost)), self.cost)
         plt.xlabel("step")
         plt.ylabel("cost")
+
+        plt.subplot(1,2,2)
+        plt.plot(np.arange(len(self.done_step_list)), self.done_step_list)
+        plt.xlabel("step")
+        plt.ylabel("done step")
         plt.show()
 
 def save_gif(frames):
@@ -97,33 +105,80 @@ def save_gif(frames):
 
 if __name__ == "__main__":
     env = gym.make('CartPole-v1')
-    state = env.reset()
     frames = []
-    model = DQN(
-        n_states = 4,
-        n_actions = 2
-    )  # 算法模型
-
     # train
     counter = 0
+    done_step = 0
+    max_done_step = 0
+    num = 200000
+    rec_num = 10
+    negative_reward = -10.0
+    x_bound = 1.0
+    max_done_step_result = []
+    done_step_list_result = []
+    for retime in range(rec_num):
+        state = env.reset()
+        model = DQN(
+            n_states=4,
+            n_actions=2
+        )  # 算法模型
+        model.cost.clear()
+        model.done_step_list.clear()
+        for i in range(num):
+            # env.render()
+            # frames.append(env.render(mode='rgb_array'))
+            epsilon = 0.9 + i / num * (0.95 - 0.9)
+            # epsilon = 0.9
+            action = model.choose_action(state, epsilon)
+            # print('action = %d' % action)
+            state_old = state
+            state, reward, done, info = env.step(action)
+            x, x_dot, theta, theta_dot = state
+            # r1 = (env.x_threshold - abs(x)) / env.x_threshold - 0.8  # x_threshold 4.8
+            # r2 = (env.theta_threshold_radians - abs(theta)) / env.theta_threshold_radians - 0.5
+            if (abs(x) > x_bound):
+                r1 = 0.5 * negative_reward
+            else:
+                r1 = negative_reward * abs(x) / x_bound + 0.5 * (-negative_reward)
+            if (abs(theta) > env.theta_threshold_radians):
+                r2 = 0.5 * negative_reward
+            else:
+                r2 = negative_reward * abs(theta) / env.theta_threshold_radians + 0.5 * (-negative_reward)
+            reward = r1 + r2
+            if done:
+                reward += negative_reward
+            # print("x = %lf, r1 = %lf, theta = %lf, r2 = %lf" % (x, r1, theta, r2))
+            model.store_transition(state_old, action, reward, state)
+            if (i > 2000 and counter % 10 == 0):
+                model.learn()
+                counter = 0
+            counter += 1
+            done_step += 1
+            if (done):
+                # print("reset env! done_step = %d, epsilon = %lf" % (done_step, epsilon))
+                if (done_step > max_done_step):
+                    max_done_step = done_step
+                state = env.reset()
+                model.done_step_list.append(done_step)
+                done_step = 0
+        #model.plot_cost()  # 误差曲线
+        print("reccurent time = %d, max done step = %d, final done step = %d" % (retime, max_done_step, model.done_step_list[-1]))
+        max_done_step_result.append(max_done_step)
+        done_step_list_result.append(model.done_step_list[-1])
+    # test
+    '''
+    state = env.reset()
     for _ in range(2000):
-        # env.render()
         frames.append(env.render(mode='rgb_array'))
-        action = model.choose_action(state, 0.9)
-        print('action = %d' % action)
-        state_old = state
+        action = model.choose_action(state, 1.0)
         state, reward, done, info = env.step(action)
-        model.store_transition(state_old, action, reward, state)
-        if (counter % 20):
-            model.learn()
-            counter = 0
-        counter += 1
         if (done):
             state = env.reset()
-
+            print("test try again")
     env.close()
+    '''
     # save_gif(frames)
 
-    model.plot_cost()  # 误差曲线
+
 
 
